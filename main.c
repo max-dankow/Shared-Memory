@@ -8,9 +8,10 @@
 #include <sys/shm.h>
 #include <sys/sem.h>
 #include <sys/mman.h>
+#include <string.h>
 
 static const ssize_t NO_TASK = -1;
-static const int CHILDREN_NUMBER = 5;
+static const int CHILDREN_NUMBER = 10;
 
 static struct sembuf sop_get_task_lock[2] = {
     {0, 0, 0}, //ожидать освобождения
@@ -103,6 +104,7 @@ int init_tasks(int file_shm_key)
         if (data[i] == '\n')
         {
             tasks[task_index] = i + 1;
+            data[i] = '\0';
             ++task_index;
         }
     }
@@ -164,9 +166,36 @@ ssize_t get_next_task(ssize_t* tasks_mem)
     return next_task;
 }
 
-void process_string(size_t offset, int child_id)
+char* process_string(char* str, int child_id)
 {
-
+    char* result = malloc(strlen(str) * 2 + 1);
+    char* index = result;
+    while (*str != '\0')
+    {
+        if (*str >= 'A' && *str <= 'Z')
+        {
+            *index = (char) tolower(*str);
+            ++index;
+            *index = (char) tolower(*str);
+            ++index;
+        }
+        else
+        {
+            if (*str >= 'a' && *str <= 'z')
+            {
+                *index = (char) toupper(*str);
+                ++index;
+            }
+            else
+            {
+                *index = *str;
+                ++index;
+            }    
+        }
+        ++str;
+    }
+    *index = '\0';
+    printf("(%d) result is: %s\n", child_id, result);
 }
 
 int main(int argc, char** argv)
@@ -186,12 +215,19 @@ int main(int argc, char** argv)
                 perror("shmap");
                 exit(EXIT_FAILURE);
             }
+            char* file_mem = shmat(file_shm_key, NULL, 0);
+            if (file_mem == (void*) -1)
+            {
+                perror("shmap");
+            } 
             printf("CHILD\n");
             ssize_t line_offset;
             do
             {
                 line_offset = get_next_task(tasks_mem);
-                printf("(%d) get %d\n", i, line_offset);
+                printf("(%d) get %d - %s\n", i, 
+                       line_offset, file_mem + line_offset);
+                process_string(file_mem + line_offset, i);
             }while(line_offset != NO_TASK);
             _exit(EXIT_SUCCESS);
         }
