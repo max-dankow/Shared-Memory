@@ -254,6 +254,7 @@ void print_result_ptrory(char* result_ptr)
 
 int main(int argc, char** argv)
 {
+  //создаем 3 области разделяемой памяти
     int file_shm_key = read_file(argc, argv);
     int tasks_shm_key = init_tasks(file_shm_key);
     int result_shm_key = init_result_buffer();
@@ -297,5 +298,9 @@ int main(int argc, char** argv)
     void* answer_mem = mount_shm(result_shm_key);
     print_result_ptrory(answer_mem);
     shmdt(answer_mem);
+  //освобождаем 3 области разделяемой памяти
+    shmctl(file_shm_key, IPC_RMID, 0);
+    shmctl(tasks_shm_key, IPC_RMID, 0);
+    shmctl(result_shm_key, IPC_RMID, 0);
     return 0;
 }
