@@ -11,7 +11,7 @@
 #include <string.h>
 
 static const ssize_t NO_TASK = -1;
-static const int CHILDREN_NUMBER = 10;
+static const int CHILDREN_NUMBER = 1;
 
 static struct sembuf sop_get_task_lock[2] = {
     {0, 0, 0}, //ожидать освобождения
@@ -143,27 +143,46 @@ int init_semaphores(void)
     int sem_group =  semget(IPC_PRIVATE, 2, 
         IPC_CREAT | 0660);
     return sem_group;
-
 }
 
-ssize_t get_next_task(ssize_t* tasks_mem)
+ssize_t get_next_task(ssize_t* tasks_mem, ssize_t *offset)
 {
   //блокируем доступ других детей
-    semop(semaphores, &sop_get_task_lock, 2);
+    semop(semaphores, sop_get_task_lock, 2);
     ssize_t next_task = NO_TASK;
+    *offset = NO_TASK;
   //ищем нерешенную задачу
     for (size_t i = 0; i < tasks_num; ++i)
     {
         if (tasks_mem[i] != NO_TASK)
         {
-            next_task = tasks_mem[i];
+            next_task = i;
+            *offset = tasks_mem[i];
             tasks_mem[i] = NO_TASK;
             break;
         }
     }
   //разблокируем доступ к задачам  
-    semop(semaphores, &sop_get_task_unlock, 1);
+    semop(semaphores, sop_get_task_unlock, 1);
     return next_task;
+}
+
+void write_result_to_buffer(size_t* result_mem, size_t task_id, char* answer)
+{
+    semop(semaphores, sop_write_res_lock, 2);
+    size_t buf_end = result_mem[0];
+    printf("header:%d\n", buf_end);
+    size_t len = strlen(answer);
+
+    memcpy((char*) result_mem + buf_end, answer, len);
+    printf("write %s\n", (char*) result_mem + buf_end);
+    result_mem[0] += len;
+    printf("new offset %d\n", result_mem[0]);
+
+    result_mem[1 + task_id * 2] = buf_end;
+    result_mem[1 + task_id * 2 + 1] = buf_end + len;
+
+    semop(semaphores, sop_write_res_unlock, 1);
 }
 
 char* process_string(char* str, int child_id)
@@ -196,17 +215,18 @@ char* process_string(char* str, int child_id)
     }
     *index = '\0';
     printf("(%d) result is: %s\n", child_id, result);
+    return result;
 }
 
 int init_result_buffer(void)
 {
   //создаем область разделяемой памяти для результатов
-  //shmget гарантирует инициалиизацию нулями
+  //shmget гарантирует инициализацию памяти нулями
     int shm_key = shmget(IPC_PRIVATE, 
       //указатель на конец текущего буфера
-        sizeof(char*)
+        sizeof(size_t)
       //для каждого задания указатель на начало и конец результата в буфере
-        + tasks_num * 2 * sizeof(char*) 
+        + tasks_num * 2 * sizeof(size_t) 
       //сам буфер, в два раза больше, чем исходный файл
         + file_length * 2, 
         IPC_CREAT | 0660);
@@ -217,20 +237,31 @@ int init_result_buffer(void)
         exit(EXIT_FAILURE);
     }
 
+    size_t* header = (size_t*) mount_shm(shm_key);
+    printf("HEADER in creation:%d\n", header[0]);
+    header[0] = sizeof(size_t) + tasks_num * 2 * sizeof(size_t);
+    printf("HEADER in creation:%d\n", header[0]);
     return shm_key;
 }
 
-void write_result_to_buffer(size_t task_id, char* answer)
+void print_result_memory(char* result_mem)
 {
-    semop(semaphores, &sop_write_res_lock, 2);
-    semop(semaphores, &sop_write_res_unlock, 1);
+    printf("Current end: %d\n", ((size_t*) result_mem)[0]);
+    size_t* header = (size_t*) result_mem + 1;
+    for (size_t i = 0; i < tasks_num; ++i)
+    {
+        //printf("%d is from %d to %d\n", i, header[i * 2], header[i * 2 + 1]);
+        write(1, result_mem + header[i * 2], header[i * 2 +  1] - header[i * 2]);
+        printf("\n");
+    }
+    //printf("BODY: %s\n", );
 }
 
 int main(int argc, char** argv)
 {
     int file_shm_key = read_file(argc, argv);
     int tasks_shm_key = init_tasks(file_shm_key);
-    int result_buf = init_result_buffer();
+    int result_shm_key = init_result_buffer();
     semaphores = init_semaphores();
 
     for (int i = 0; i < CHILDREN_NUMBER; ++i)
@@ -240,17 +271,28 @@ int main(int argc, char** argv)
         {
             ssize_t* tasks_mem = (ssize_t*) mount_shm(tasks_shm_key);
             char* file_mem = (char*) mount_shm(file_shm_key); 
+            void* result_mem = mount_shm(result_shm_key);
             ssize_t line_offset;
 
-            do
+            while (1)
             {
-                line_offset = get_next_task(tasks_mem);
+                ssize_t offset;
+                ssize_t task_id = get_next_task(tasks_mem, &offset);
+                if (task_id == NO_TASK)
+                {
+                    break;
+                }
 
-                printf("(%d) get %d - %s\n", i, 
-                       line_offset, file_mem + line_offset);
+                printf("(%d) get %d, offset=%d - %s\n", i, 
+                       task_id, offset, file_mem + offset);
 
-                process_string(file_mem + line_offset, i);
-            }while(line_offset != NO_TASK);
+                char* answer = process_string(file_mem + offset, i);
+                //print_result_memory(result_mem);
+                //sleep(3);
+                write_result_to_buffer(result_mem, task_id, answer);
+                free(answer);
+                //printf("COMMON MEM:%s\n", result_mem + sizeof(char*) + tasks_num * 2 * sizeof(char*));
+            }
 
             _exit(EXIT_SUCCESS);
         }
@@ -260,5 +302,9 @@ int main(int argc, char** argv)
     {
         wait(NULL);
     }
+
+    void* answer_mem = mount_shm(result_shm_key);
+    print_result_memory(answer_mem);
     return 0;
 }
+
