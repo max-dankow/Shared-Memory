@@ -9,30 +9,15 @@
 #include <sys/sem.h>
 #include <sys/mman.h>
 #include <string.h>
+#include <semaphore.h>
 
 static const ssize_t NO_TASK = -1;
 static const int CHILDREN_NUMBER = 10;
 
-//операции блокировки/разблокировки получения задачи
-static struct sembuf sop_get_task_lock[2] = {
-    {0, 0, 0}, //ожидать освобождения
-    {0, 1, 0} //занять семафор
-};
-static struct sembuf sop_get_task_unlock[1] = {
-    {0, -1, 0}
-};
-//операции блокировки/разблокировки записи в буфер результатов
-static struct sembuf sop_write_res_lock[2] = {
-    {1, 0, 0}, //ожидать освобождения
-    {1, 1, 0}  //занять семафор
-};
-static struct sembuf sop_write_res_unlock[1] = {
-    {1, -1, 0}
-};
-
 size_t file_length;
 size_t tasks_num;
-int semaphores;
+sem_t sem_get_tasks;
+sem_t sem_write_res;
 
 void* mount_shm(int shm_key)
 {
@@ -136,20 +121,10 @@ int init_tasks(int file_shm_key)
     return shm_key;
 }
 
-int init_semaphores(void)
-{
-  //создадим группу из двух семафоров, 
-  //0 - на чтение задачи, 1 - на запись результата
-    int sem_group =  semget(IPC_PRIVATE, 2, 
-        IPC_CREAT | 0660);
-    return sem_group;
-}
-
 ssize_t get_next_task(ssize_t* tasks_ptr, ssize_t *offset)
 {
   //блокируем доступ других детей
-    semop(semaphores, sop_get_task_lock, 2);
-
+    sem_wait(&sem_get_tasks);
     ssize_t next_task = NO_TASK;
     *offset = NO_TASK;
   //ищем нерешенную задачу
@@ -164,24 +139,22 @@ ssize_t get_next_task(ssize_t* tasks_ptr, ssize_t *offset)
         }
     }
   //разблокируем доступ к задачам  
-    semop(semaphores, sop_get_task_unlock, 1);
+    sem_post(&sem_get_tasks);
     return next_task;
 }
 
 void write_result_to_buffer(size_t* result_ptr, size_t task_id, char* answer)
 {
-  //блокируем запись в буфер результатов
-    semop(semaphores, sop_write_res_lock, 2);
-  //записываем строку в буфер и сдвигаем 'указатель' свободного блока
+    sem_wait(&sem_write_res);
     size_t buf_end = result_ptr[0];
     size_t len = strlen(answer);
+  //сдвигаем 'указатель' свободного блока  
+    result_ptr[0] += len; 
+    sem_post(&sem_write_res);
     memcpy((char*) result_ptr + buf_end, answer, len);
-    result_ptr[0] += len;
   //указываем в заголовке, где 'лежит' строка
     result_ptr[1 + task_id * 2] = buf_end;
     result_ptr[1 + task_id * 2 + 1] = buf_end + len;
-  //разблокируем буфер результатов  
-    semop(semaphores, sop_write_res_unlock, 1);
 }
 
 char* process_string(char* str)
@@ -242,7 +215,7 @@ int init_result_buffer(void)
     return shm_key;
 }
 
-void print_result_ptrory(char* result_ptr)
+void print_result(char* result_ptr)
 {
     size_t* header = (size_t*) result_ptr + 1;
     for (size_t i = 0; i < tasks_num; ++i)
@@ -258,7 +231,12 @@ int main(int argc, char** argv)
     int file_shm_key = read_file(argc, argv);
     int tasks_shm_key = init_tasks(file_shm_key);
     int result_shm_key = init_result_buffer();
-    semaphores = init_semaphores();
+    
+    if (sem_init(&sem_get_tasks, 0, 1) == -1 || sem_init(&sem_write_res, 0, 1))
+    {
+        perror("sem_init");
+        exit(EXIT_FAILURE);
+    }
 
     for (int i = 0; i < CHILDREN_NUMBER; ++i)
     {
@@ -296,11 +274,13 @@ int main(int argc, char** argv)
     }
 
     void* answer_mem = mount_shm(result_shm_key);
-    print_result_ptrory(answer_mem);
+    print_result(answer_mem);
     shmdt(answer_mem);
-  //освобождаем 3 области разделяемой памяти
+
     shmctl(file_shm_key, IPC_RMID, 0);
     shmctl(tasks_shm_key, IPC_RMID, 0);
     shmctl(result_shm_key, IPC_RMID, 0);
+    sem_destroy(&sem_get_tasks);
+    sem_destroy(&sem_write_res);
     return 0;
 }

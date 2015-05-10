@@ -1,8 +1,5 @@
 all:prog
 
-prog:main.o
-	gcc main.o -o prog -lrt
-
-main.o:main.c
-	gcc -c main.c -o main.o -std=c99
+prog:main.c
+	gcc main.c -o prog -lrt -std=c99 -pthread
 main.c:
