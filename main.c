@@ -12,7 +12,7 @@
 #include <semaphore.h>
 
 static const ssize_t NO_TASK = -1;
-static const int CHILDREN_NUMBER = 1;
+static const int CHILDREN_NUMBER = 10;
 
 size_t file_length;
 size_t tasks_num;
